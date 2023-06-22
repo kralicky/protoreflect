@@ -91,7 +91,7 @@ func (p *Printer) printMessageLiteralToBuffer(buf *bytes.Buffer, msg protoreflec
 }
 
 func (p *Printer) printMessageLiteralToBufferMaybeCompact(buf *bytes.Buffer, msg protoreflect.Message, res *protoregistry.Types, pkg, scope string, threshold, indent int) {
-	if indent >= 0 {
+	if (p.Compact&CompactMessageLiterals) != 0 && indent >= 0 {
 		// first see if the message is compact enough to fit on one line
 		str := p.printMessageLiteralCompact(msg, res, pkg, scope)
 		fieldCount := strings.Count(str, ",")
@@ -182,7 +182,7 @@ func (p *Printer) printValueLiteralToBuffer(buf *bytes.Buffer, fld protoreflect.
 func (p *Printer) maybeNewline(buf *bytes.Buffer, indent int) {
 	if indent < 0 {
 		// compact form
-		buf.WriteRune(' ')
+		// buf.WriteRune(' ')
 		return
 	}
 	buf.WriteRune('\n')
@@ -190,7 +190,7 @@ func (p *Printer) maybeNewline(buf *bytes.Buffer, indent int) {
 }
 
 func (p *Printer) printArrayLiteralToBufferMaybeCompact(buf *bytes.Buffer, fld protoreflect.FieldDescriptor, val protoreflect.List, res *protoregistry.Types, pkg, scope string, threshold, indent int) {
-	if indent >= 0 {
+	if (p.Compact&CompactMessageLiterals) != 0 && indent >= 0 {
 		// first see if the array is compact enough to fit on one line
 		str := p.printArrayLiteralCompact(fld, val, res, pkg, scope)
 		elementCount := strings.Count(str, ",")
@@ -221,14 +221,19 @@ func (p *Printer) printArrayLiteralToBuffer(buf *bytes.Buffer, fld protoreflect.
 		indent++
 	}
 
+	isMessage := fld.Kind() == protoreflect.MessageKind || fld.Kind() == protoreflect.GroupKind
+
 	for i := 0; i < val.Len(); i++ {
 		if i > 0 {
 			buf.WriteRune(',')
 		}
-		p.maybeNewline(buf, indent)
-		if fld.Kind() == protoreflect.MessageKind || fld.Kind() == protoreflect.GroupKind {
+		if isMessage {
+			p.maybeNewline(buf, indent)
 			p.printMessageLiteralToBufferMaybeCompact(buf, val.Get(i).Message(), res, pkg, scope, threshold, indent)
 		} else {
+			if i > 0 && i < val.Len() {
+				buf.WriteRune(' ')
+			}
 			p.printValueLiteralToBuffer(buf, fld, val.Get(i).Interface())
 		}
 	}
@@ -236,12 +241,14 @@ func (p *Printer) printArrayLiteralToBuffer(buf *bytes.Buffer, fld protoreflect.
 	if indent >= 0 {
 		indent--
 	}
-	p.maybeNewline(buf, indent)
+	if isMessage {
+		p.maybeNewline(buf, indent)
+	}
 	buf.WriteRune(']')
 }
 
 func (p *Printer) printMapLiteralToBufferMaybeCompact(buf *bytes.Buffer, fld protoreflect.FieldDescriptor, val protoreflect.Map, res *protoregistry.Types, pkg, scope string, threshold, indent int) {
-	if indent >= 0 {
+	if (p.Compact&CompactMessageLiterals) != 0 && indent >= 0 {
 		// first see if the map is compact enough to fit on one line
 		str := p.printMapLiteralCompact(fld, val, res, pkg, scope)
 		if len(str) <= threshold {

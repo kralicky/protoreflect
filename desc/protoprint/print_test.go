@@ -63,7 +63,7 @@ func reverseByName(a, b Element) bool {
 func TestPrinter(t *testing.T) {
 	prs := map[string]*Printer{
 		"default":                             {},
-		"compact":                             {Compact: true, ShortOptionsExpansionThresholdCount: 5, ShortOptionsExpansionThresholdLength: 100, MessageLiteralExpansionThresholdLength: 80},
+		"compact":                             {Compact: CompactAll, ShortOptionsExpansionThresholdCount: 5, ShortOptionsExpansionThresholdLength: 100, MessageLiteralExpansionThresholdLength: 80},
 		"no-trailing-comments":                {OmitComments: CommentsTrailing},
 		"trailing-on-next-line":               {TrailingCommentsOnSeparateLine: true},
 		"only-doc-comments":                   {OmitComments: CommentsNonDoc},
@@ -199,7 +199,7 @@ func TestPrintNonFileDescriptors(t *testing.T) {
 	checkContents(t, buf.String(), "test-non-files-full.txt")
 
 	buf.Reset()
-	crawl(t, fd, &Printer{OmitComments: CommentsNonDoc, Compact: true, SortElements: true, ForceFullyQualifiedNames: true}, &buf)
+	crawl(t, fd, &Printer{OmitComments: CommentsNonDoc, Compact: CompactAll, SortElements: true, ForceFullyQualifiedNames: true}, &buf)
 	checkContents(t, buf.String(), "test-non-files-compact.txt")
 }
 

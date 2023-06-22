@@ -24,6 +24,26 @@ import (
 	"github.com/jhump/protoreflect/desc/internal"
 )
 
+type (
+	CompactFlags uint32
+	SortFlags    uint32
+)
+
+const (
+	CompactImports CompactFlags = 1 << iota
+	CompactTopLevelDeclarations
+	CompactRPCs
+	CompactOptions
+	CompactFields
+	CompactExtensions
+	CompactComments
+	CompactTrailingComments
+	CompactMessageLiterals
+	CompactAll = 1<<iota - 1
+
+	CompactDefault = CompactImports | CompactFields | CompactTrailingComments
+)
+
 // Printer knows how to format file descriptors as proto source code. Its fields
 // provide some control over how the resulting source file is constructed and
 // formatted.
@@ -113,7 +133,7 @@ type Printer struct {
 	// detached comments are being printed, this will cause them to be merged
 	// into the subsequent leading comments. Similarly, any element trailing
 	// comments will be merged into the subsequent leading comments.
-	Compact bool
+	Compact CompactFlags
 
 	// If true, all references to messages, extensions, and enums (such as in
 	// options, field types, and method request and response types) will be
@@ -276,7 +296,7 @@ type reservedRange struct {
 
 // PrintProtoFile prints the given single file descriptor to the given writer.
 func (p *Printer) PrintProtoFile(fd *desc.FileDescriptor, out io.Writer) error {
-	return p.printProto(fd, out)
+	return p.PrintProto(fd, out)
 }
 
 // PrintProtoToString prints the given descriptor and returns the resulting
@@ -286,13 +306,13 @@ func (p *Printer) PrintProtoFile(fd *desc.FileDescriptor, out io.Writer) error {
 // consumption.
 func (p *Printer) PrintProtoToString(dsc desc.Descriptor) (string, error) {
 	var buf bytes.Buffer
-	if err := p.printProto(dsc, &buf); err != nil {
+	if err := p.PrintProto(dsc, &buf); err != nil {
 		return "", err
 	}
 	return buf.String(), nil
 }
 
-func (p *Printer) printProto(dsc desc.Descriptor, out io.Writer) error {
+func (p *Printer) PrintProto(dsc desc.Descriptor, out io.Writer) error {
 	w := newWriter(out)
 
 	if p.Indent == "" {
@@ -338,7 +358,7 @@ func (p *Printer) printProto(dsc desc.Descriptor, out io.Writer) error {
 		if d.IsExtension() {
 			_, _ = fmt.Fprint(w, "extend ")
 			extNameSi := sourceInfo.Get(append(path, internal.Field_extendeeTag))
-			p.printElementString(extNameSi, w, 0, p.qualifyName(d.GetFile().GetPackage(), scope, d.GetOwner().GetFullyQualifiedName()))
+			p.printfElementString(extNameSi, w, 0, "%s ", p.qualifyName(d.GetFile().GetPackage(), scope, d.GetOwner().GetFullyQualifiedName()))
 			_, _ = fmt.Fprintln(w, "{")
 
 			p.printField(d, &reg, w, sourceInfo, path, scope, 1)
@@ -474,9 +494,10 @@ func getMethodIndex(mtd *desc.MethodDescriptor, list []*desc.MethodDescriptor) i
 	panic(fmt.Sprintf("unable to determine index of method %s", mtd.GetFullyQualifiedName()))
 }
 
-func (p *Printer) newLine(w io.Writer) {
-	if !p.Compact {
-		_, _ = fmt.Fprintln(w)
+// print a new line only if the given compact flags are not set.
+func (p *Printer) newLine(w io.Writer, mask CompactFlags) {
+	if p.Compact&mask == 0 {
+		fmt.Fprintln(w)
 	}
 }
 
@@ -537,7 +558,7 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 		}
 		_, _ = fmt.Fprintf(w, "syntax = %q;", syn)
 	})
-	p.newLine(w)
+	p.newLine(w, CompactTopLevelDeclarations)
 
 	skip := map[interface{}]bool{}
 
@@ -572,6 +593,7 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 
 	pkgName := fd.GetPackage()
 
+	needsBlankLine := false
 	for i, el := range elements.addrs {
 		d := elements.at(el)
 
@@ -582,8 +604,8 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 			continue
 		}
 
-		if i > 0 {
-			p.newLine(w)
+		if needsBlankLine {
+			p.newLine(w, CompactTopLevelDeclarations)
 		}
 
 		path = []int32{el.elementType, int32(el.elementIndex)}
@@ -594,6 +616,7 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 			p.printElement(false, si, w, 0, func(w *writer) {
 				_, _ = fmt.Fprintf(w, "package %s;", d)
 			})
+			needsBlankLine = true
 		case imp:
 			si := sourceInfo.Get(path)
 			var modifier string
@@ -614,14 +637,26 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 			p.printElement(false, si, w, 0, func(w *writer) {
 				_, _ = fmt.Fprintf(w, "import %s%q;", modifier, d)
 			})
+			if p.Compact&CompactImports != 0 {
+				// if CompactImports is set, don't print a newline between imports
+				// when CompactTopLevelDeclarations is set
+				nextElementIsImport := (i < len(elements.addrs)-1 && elements.addrs[i+1].elementType == internal.File_dependencyTag)
+				needsBlankLine = !nextElementIsImport
+			} else {
+				needsBlankLine = true
+			}
 		case []option:
 			p.printOptionsLong(d, reg, w, sourceInfo, path, 0)
+			needsBlankLine = true
 		case *desc.MessageDescriptor:
 			p.printMessage(d, reg, w, sourceInfo, path, 0)
+			needsBlankLine = true
 		case *desc.EnumDescriptor:
 			p.printEnum(d, reg, w, sourceInfo, path, 0)
+			needsBlankLine = true
 		case *desc.ServiceDescriptor:
 			p.printService(d, reg, w, sourceInfo, path, 0)
+			needsBlankLine = true
 		case *desc.FieldDescriptor:
 			extDecl := exts[d]
 			p.printExtensions(extDecl, exts, elements, i, reg, w, sourceInfo, nil, internal.File_extensionsTag, pkgName, pkgName, 0)
@@ -629,6 +664,7 @@ func (p *Printer) printFile(fd *desc.FileDescriptor, reg *protoregistry.Types, w
 			for _, fld := range extDecl.fields {
 				skip[fld] = true
 			}
+			needsBlankLine = true
 		}
 	}
 }
@@ -825,7 +861,7 @@ func (p *Printer) printMessage(md *desc.MessageDescriptor, reg *protoregistry.Ty
 
 		_, _ = fmt.Fprint(w, "message ")
 		nameSi := sourceInfo.Get(append(path, internal.Message_nameTag))
-		p.printElementString(nameSi, w, indent, md.GetName())
+		p.printfElementString(nameSi, w, indent, "%s ", md.GetName())
 		_, _ = fmt.Fprintln(w, "{")
 		trailer(indent+1, true)
 
@@ -898,7 +934,7 @@ func (p *Printer) printMessageBody(md *desc.MessageDescriptor, reg *protoregistr
 		}
 
 		if i > 0 {
-			p.newLine(w)
+			p.newLine(w, CompactFields)
 		}
 
 		childPath := append(path, el.elementType, int32(el.elementIndex))
@@ -1026,7 +1062,7 @@ func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types
 		p.indent(w, indent)
 		if shouldEmitLabel(fld) {
 			locSi := sourceInfo.Get(append(path, internal.Field_labelTag))
-			p.printElementString(locSi, w, indent, labelString(fld.GetLabel()))
+			p.printfElementString(locSi, w, indent, "%s ", labelString(fld.GetLabel()))
 		}
 
 		if group {
@@ -1034,16 +1070,16 @@ func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types
 		}
 
 		typeSi := sourceInfo.Get(append(path, internal.Field_typeTag))
-		p.printElementString(typeSi, w, indent, p.typeString(fld, scope))
+		p.printfElementString(typeSi, w, indent, "%s ", p.typeString(fld, scope))
 
 		if !group {
 			nameSi := sourceInfo.Get(append(path, internal.Field_nameTag))
-			p.printElementString(nameSi, w, indent, fld.GetName())
+			p.printfElementString(nameSi, w, indent, "%s ", fld.GetName())
 		}
 
 		_, _ = fmt.Fprint(w, "= ")
 		numSi := sourceInfo.Get(append(path, internal.Field_numberTag))
-		p.printElementString(numSi, w, indent, fmt.Sprintf("%d", fld.GetNumber()))
+		p.printfElementString(numSi, w, indent, "%d ", fld.GetNumber())
 
 		opts, err := p.extractOptions(fld, protov1.MessageV2(fld.GetOptions()))
 		if err != nil {
@@ -1116,7 +1152,7 @@ func (p *Printer) printOneOf(ood *desc.OneOfDescriptor, parentElements elementAd
 		p.indent(w, indent)
 		_, _ = fmt.Fprint(w, "oneof ")
 		extNameSi := sourceInfo.Get(append(oopath, internal.OneOf_nameTag))
-		p.printElementString(extNameSi, w, indent, ood.GetName())
+		p.printfElementString(extNameSi, w, indent, "%s ", ood.GetName())
 		_, _ = fmt.Fprintln(w, "{")
 		indent++
 		trailer(indent, true)
@@ -1153,7 +1189,7 @@ func (p *Printer) printOneOf(ood *desc.OneOfDescriptor, parentElements elementAd
 
 		for i, el := range elements.addrs {
 			if i > 0 {
-				p.newLine(w)
+				p.newLine(w, CompactFields)
 			}
 
 			switch d := elements.at(el).(type) {
@@ -1177,10 +1213,10 @@ func (p *Printer) printExtensions(exts *extensionDecl, allExts extensions, paren
 	p.indent(w, indent)
 	_, _ = fmt.Fprint(w, "extend ")
 	extNameSi := sourceInfo.Get(append(path, 0, internal.Field_extendeeTag))
-	p.printElementString(extNameSi, w, indent, p.qualifyName(pkg, scope, exts.extendee))
+	p.printfElementString(extNameSi, w, indent, "%s ", p.qualifyName(pkg, scope, exts.extendee))
 	_, _ = fmt.Fprintln(w, "{")
 
-	if p.printTrailingComments(exts.sourceInfo, w, indent+1) && !p.Compact {
+	if p.printTrailingComments(exts.sourceInfo, w, indent+1) && (p.Compact&CompactTrailingComments) == 0 {
 		// separator line between trailing comment and next element
 		_, _ = fmt.Fprintln(w)
 	}
@@ -1197,7 +1233,7 @@ func (p *Printer) printExtensions(exts *extensionDecl, allExts extensions, paren
 			if first {
 				first = false
 			} else {
-				p.newLine(w)
+				p.newLine(w, CompactFields)
 			}
 			childPath := append(path, int32(el.elementIndex))
 			p.printField(fld, reg, w, sourceInfo, childPath, scope, indent+1)
@@ -1282,7 +1318,7 @@ func (p *Printer) printReservedNames(names []string, addrs []elementAddr, w *wri
 		}
 		el := addrs[i]
 		si := sourceInfo.Get(append(parentPath, el.elementType, int32(el.elementIndex)))
-		p.printElementString(si, w, indent, quotedString(name))
+		p.printfElementString(si, w, indent, "%s ", quotedString(name))
 	}
 
 	_, _ = fmt.Fprintln(w, ";")
@@ -1295,7 +1331,7 @@ func (p *Printer) printEnum(ed *desc.EnumDescriptor, reg *protoregistry.Types, w
 
 		_, _ = fmt.Fprint(w, "enum ")
 		nameSi := sourceInfo.Get(append(path, internal.Enum_nameTag))
-		p.printElementString(nameSi, w, indent, ed.GetName())
+		p.printfElementString(nameSi, w, indent, "%s ", ed.GetName())
 		_, _ = fmt.Fprintln(w, "{")
 		indent++
 		trailer(indent, true)
@@ -1335,7 +1371,7 @@ func (p *Printer) printEnum(ed *desc.EnumDescriptor, reg *protoregistry.Types, w
 			}
 
 			if i > 0 {
-				p.newLine(w)
+				p.newLine(w, CompactFields)
 			}
 
 			childPath := append(path, el.elementType, int32(el.elementIndex))
@@ -1389,11 +1425,11 @@ func (p *Printer) printEnumValue(evd *desc.EnumValueDescriptor, reg *protoregist
 		p.indent(w, indent)
 
 		nameSi := sourceInfo.Get(append(path, internal.EnumVal_nameTag))
-		p.printElementString(nameSi, w, indent, evd.GetName())
+		p.printfElementString(nameSi, w, indent, "%s ", evd.GetName())
 		_, _ = fmt.Fprint(w, "= ")
 
 		numSi := sourceInfo.Get(append(path, internal.EnumVal_numberTag))
-		p.printElementString(numSi, w, indent, fmt.Sprintf("%d", evd.GetNumber()))
+		p.printfElementString(numSi, w, indent, "%d ", evd.GetNumber())
 
 		p.extractAndPrintOptionsShort(evd, protov1.MessageV2(evd.GetOptions()), reg, internal.EnumVal_optionsTag, w, sourceInfo, path, indent)
 
@@ -1408,7 +1444,7 @@ func (p *Printer) printService(sd *desc.ServiceDescriptor, reg *protoregistry.Ty
 
 		_, _ = fmt.Fprint(w, "service ")
 		nameSi := sourceInfo.Get(append(path, internal.Service_nameTag))
-		p.printElementString(nameSi, w, indent, sd.GetName())
+		p.printfElementString(nameSi, w, indent, "%s ", sd.GetName())
 		_, _ = fmt.Fprintln(w, "{")
 		indent++
 		trailer(indent, true)
@@ -1431,7 +1467,7 @@ func (p *Printer) printService(sd *desc.ServiceDescriptor, reg *protoregistry.Ty
 
 		for i, el := range elements.addrs {
 			if i > 0 {
-				p.newLine(w)
+				p.newLine(w, CompactRPCs)
 			}
 
 			childPath := append(path, el.elementType, int32(el.elementIndex))
@@ -1459,7 +1495,7 @@ func (p *Printer) printMethod(mtd *desc.MethodDescriptor, reg *protoregistry.Typ
 		nameSi := sourceInfo.Get(append(path, internal.Method_nameTag))
 		p.printElementString(nameSi, w, indent, mtd.GetName())
 
-		_, _ = fmt.Fprint(w, "( ")
+		_, _ = fmt.Fprint(w, "(")
 		inSi := sourceInfo.Get(append(path, internal.Method_inputTag))
 		inName := p.qualifyName(pkg, pkg, mtd.GetInputType().GetFullyQualifiedName())
 		if mtd.IsClientStreaming() {
@@ -1467,7 +1503,7 @@ func (p *Printer) printMethod(mtd *desc.MethodDescriptor, reg *protoregistry.Typ
 		}
 		p.printElementString(inSi, w, indent, inName)
 
-		_, _ = fmt.Fprint(w, ") returns ( ")
+		_, _ = fmt.Fprint(w, ") returns (")
 
 		outSi := sourceInfo.Get(append(path, internal.Method_outputTag))
 		outName := p.qualifyName(pkg, pkg, mtd.GetOutputType().GetFullyQualifiedName())
@@ -1496,7 +1532,7 @@ func (p *Printer) printMethod(mtd *desc.MethodDescriptor, reg *protoregistry.Typ
 
 			for i, el := range elements.addrs {
 				if i > 0 {
-					p.newLine(w)
+					p.newLine(w, CompactOptions)
 				}
 				o := elements.at(el).([]option)
 				childPath := append(path, el.elementType, int32(el.elementIndex))
@@ -1634,7 +1670,7 @@ func (p *Printer) printOptionElementsShort(addrs elementAddrs, reg *protoregistr
 	if expand {
 		p.indent(w, indent-1)
 	}
-	_, _ = fmt.Fprint(w, "] ")
+	_, _ = fmt.Fprint(w, "]")
 }
 
 func (p *Printer) printOptions(opts []option, w *writer, indent int, siFetch func(i int32) *descriptorpb.SourceCodeInfo_Location, fn func(w *writer, indent int, opt option, more bool), haveMore bool) {
@@ -2433,7 +2469,7 @@ func (p *Printer) printBlockElement(isDecriptor bool, si *descriptorpb.SourceCod
 	}
 	el(w, func(indent int, wantTrailingNewline bool) {
 		if includeComments && si != nil {
-			if p.printTrailingComments(si, w, indent) && wantTrailingNewline && !p.Compact {
+			if p.printTrailingComments(si, w, indent) && wantTrailingNewline && (p.Compact&CompactTrailingComments) == 0 {
 				// separator line between trailing comment and next element
 				_, _ = fmt.Fprintln(w)
 			}
@@ -2461,9 +2497,15 @@ func (p *Printer) printElement(isDecriptor bool, si *descriptorpb.SourceCodeInfo
 	}
 }
 
+func (p *Printer) printfElementString(si *descriptorpb.SourceCodeInfo_Location, w *writer, indent int, format string, a ...any) {
+	p.printElement(false, si, w, inline(indent), func(w *writer) {
+		_, _ = fmt.Fprintf(w, format, a...)
+	})
+}
+
 func (p *Printer) printElementString(si *descriptorpb.SourceCodeInfo_Location, w *writer, indent int, str string) {
 	p.printElement(false, si, w, inline(indent), func(w *writer) {
-		_, _ = fmt.Fprintf(w, "%s ", str)
+		_, _ = fmt.Fprint(w, str)
 	})
 }
 
@@ -2479,7 +2521,7 @@ func (p *Printer) printLeadingComments(si *descriptorpb.SourceCodeInfo_Location,
 			if p.printComment(c, w, indent, true) {
 				// if comment ended in newline, add another newline to separate
 				// this comment from the next
-				p.newLine(w)
+				p.newLine(w, CompactComments)
 				endsInNewLine = true
 			} else if indent < 0 {
 				// comment did not end in newline and we are trying to inline?
@@ -2491,7 +2533,7 @@ func (p *Printer) printLeadingComments(si *descriptorpb.SourceCodeInfo_Location,
 				// add newline to end of comment and add another to separate this
 				// comment from what follows
 				_, _ = fmt.Fprintln(w) // needed to end comment, regardless of p.Compact
-				p.newLine(w)
+				p.newLine(w, CompactComments)
 				endsInNewLine = true
 			}
 		}
