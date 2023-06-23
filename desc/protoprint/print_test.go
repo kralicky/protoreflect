@@ -28,7 +28,7 @@ const (
 	testFilesDirectory = "testfiles"
 )
 
-func reverseByName(a, b Element) bool {
+func reverseByName(a, b Element, _ func() bool) bool {
 	// custom sort that is practically the *reverse* of default sort
 	// order, though things like fields/extensions/enum values are
 	// sorted by name (descending) instead of by number

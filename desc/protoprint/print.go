@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	protov1 "github.com/golang/protobuf/proto"
+	"golang.org/x/exp/slices"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -93,7 +94,7 @@ type Printer struct {
 	// field is consulted to decide how to order the output. If this field is
 	// non-nil, the SortElements field is ignored and this function is called to
 	// order elements.
-	CustomSortFunction func(a, b Element) bool
+	CustomSortFunction func(a, b Element, ignore func() bool) bool
 
 	// The indentation used. Any characters other than spaces or tabs will be
 	// replaced with spaces. If unset/empty, two spaces will be used.
@@ -743,19 +744,24 @@ func (p *Printer) computeExtensions(sourceInfo internal.SourceInfoMap, exts []*d
 }
 
 func (p *Printer) sort(elements elementAddrs, sourceInfo internal.SourceInfoMap, path []int32) {
+	sourceOrder := elementSrcOrder{
+		elementAddrs: elements,
+		sourceInfo:   sourceInfo,
+		prefix:       path,
+	}
 	if p.CustomSortFunction != nil {
-		sort.Stable(customSortOrder{elementAddrs: elements, less: p.CustomSortFunction})
+		sort.Stable(customSortOrder{
+			sourceOrder:  sourceOrder,
+			elementAddrs: elements,
+			less:         p.CustomSortFunction,
+		})
 	} else if p.SortElements {
 		// canonical sorted order
 		sort.Stable(elements)
 	} else {
 		// use source order (per location information in SourceCodeInfo); or
 		// if that isn't present use declaration order, but grouped by type
-		sort.Stable(elementSrcOrder{
-			elementAddrs: elements,
-			sourceInfo:   sourceInfo,
-			prefix:       path,
-		})
+		sort.Stable(sourceOrder)
 	}
 }
 
@@ -953,7 +959,47 @@ func (p *Printer) printMessageBody(md *desc.MessageDescriptor, reg *protoregistr
 			} else {
 				ood := d.GetOneOf()
 				if ood == nil || ood.IsSynthetic() {
-					p.printField(d, reg, w, sourceInfo, childPath, scope, indent)
+					// before printing the field, look ahead to see if there are more fields
+					// directly adjacent to this one. If so, we can print them all together
+					// in a column layout so that the field names and '=' signs line up.
+					var adjacentFields []*desc.FieldDescriptor
+					var adjacentPaths [][]int32
+					for j := i + 1; j < len(elements.addrs); j++ {
+						nextAddr := elements.addrs[j]
+						if nextAddr.elementType != el.elementType {
+							break
+						}
+						next := elements.at(nextAddr)
+						if skip[next] {
+							continue
+						}
+						if nextField, ok := next.(*desc.FieldDescriptor); ok {
+							if ood := nextField.GetOneOf(); ood != nil && !ood.IsSynthetic() {
+								break
+							}
+							if isGroup(nextField) {
+								break
+							}
+							// next field in the message, good so far
+							// if there are leading comments, stop here
+							if len(nextField.GetSourceInfo().GetLeadingComments()) > 0 ||
+								len(nextField.GetSourceInfo().GetLeadingDetachedComments()) > 0 {
+								break
+							}
+							// found another field, so we can print this one in a column
+							adjacentFields = append(adjacentFields, nextField)
+							nextFieldPath := slices.Clone(childPath)
+							nextFieldPath[len(nextFieldPath)-1] = int32(nextAddr.elementIndex)
+							adjacentPaths = append(adjacentPaths, nextFieldPath)
+							skip[next] = true
+						}
+					}
+					if len(adjacentFields) > 0 {
+						// print all the fields together
+						p.printAdjacentFieldsAligned(append([]*desc.FieldDescriptor{d}, adjacentFields...), reg, w, sourceInfo, append([][]int32{childPath}, adjacentPaths...), scope, indent)
+					} else {
+						p.printField(d, reg, w, sourceInfo, childPath, scope, indent)
+					}
 				} else {
 					// print the one-of, including all of its fields
 					p.printOneOf(ood, elements, i, reg, w, sourceInfo, path, indent, d.AsFieldDescriptorProto().GetOneofIndex())
@@ -1018,9 +1064,14 @@ func (p *Printer) printMessageBody(md *desc.MessageDescriptor, reg *protoregistr
 	}
 }
 
-func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types, w *writer, sourceInfo internal.SourceInfoMap, path []int32, scope string, indent int) {
+func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types, w *writer, sourceInfo internal.SourceInfoMap, path []int32, scope string, indent int, format ...string) {
 	var groupPath []int32
 	var si *descriptorpb.SourceCodeInfo_Location
+
+	formatStr := "%s "
+	if len(format) > 0 {
+		formatStr = format[0]
+	}
 
 	group := isGroup(fld)
 
@@ -1062,7 +1113,7 @@ func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types
 		p.indent(w, indent)
 		if shouldEmitLabel(fld) {
 			locSi := sourceInfo.Get(append(path, internal.Field_labelTag))
-			p.printfElementString(locSi, w, indent, "%s ", labelString(fld.GetLabel()))
+			p.printfElementString(locSi, w, indent, formatStr, labelString(fld.GetLabel()))
 		}
 
 		if group {
@@ -1070,16 +1121,16 @@ func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types
 		}
 
 		typeSi := sourceInfo.Get(append(path, internal.Field_typeTag))
-		p.printfElementString(typeSi, w, indent, "%s ", p.typeString(fld, scope))
+		p.printfElementString(typeSi, w, indent, formatStr, p.typeString(fld, scope))
 
 		if !group {
 			nameSi := sourceInfo.Get(append(path, internal.Field_nameTag))
-			p.printfElementString(nameSi, w, indent, "%s ", fld.GetName())
+			p.printfElementString(nameSi, w, indent, formatStr, fld.GetName())
 		}
 
 		_, _ = fmt.Fprint(w, "= ")
 		numSi := sourceInfo.Get(append(path, internal.Field_numberTag))
-		p.printfElementString(numSi, w, indent, "%d ", fld.GetNumber())
+		p.printfElementString(numSi, w, indent, formatStr, fmt.Sprint(fld.GetNumber()))
 
 		opts, err := p.extractOptions(fld, protov1.MessageV2(fld.GetOptions()))
 		if err != nil {
@@ -1121,6 +1172,91 @@ func (p *Printer) printField(fld *desc.FieldDescriptor, reg *protoregistry.Types
 			trailer(indent, false)
 		}
 	})
+}
+
+const (
+	segmentColumn = iota
+	segmentContext
+)
+
+type segment struct {
+	kind  int
+	bytes []byte
+}
+
+func (p *Printer) printAdjacentFieldsAligned(fields []*desc.FieldDescriptor, reg *protoregistry.Types, w *writer, sourceInfo internal.SourceInfoMap, paths [][]int32, scope string, indent int) {
+	lines := make([][]segment, 0, len(fields))
+	lineBuf := new(bytes.Buffer)
+	var segments []segment
+	for i, fld := range fields {
+		segments = []segment{}
+		lineBuf.Reset()
+		p.printField(fld, reg, newWriter(lineBuf), sourceInfo, paths[i], scope, indent, "\f%s\f ")
+		lineBytes := lineBuf.Bytes()
+
+		// within the line string, each column is bounded by form feeds.
+		// split the columns and preserve spaces between columns so we can
+		// splice them back in between the resized columns later.
+		var currentSegment segment
+		currentSegment.kind = segmentContext
+		// each time a form feed is read, toggle the segment kind
+		for _, b := range lineBytes {
+			if b == '\f' {
+				segments = append(segments, currentSegment)
+				nextKind := currentSegment.kind ^ 1
+				currentSegment = segment{
+					kind: nextKind,
+				}
+			} else {
+				currentSegment.bytes = append(currentSegment.bytes, b)
+			}
+		}
+		segments = append(segments, currentSegment)
+
+		// special case: "optional", "required", and "repeated" are considered to be
+		// part of the type column for purposes of alignment.
+		for i, sg := range segments {
+			if sg.kind == segmentColumn && i < 3 && (bytes.Equal(sg.bytes, []byte("optional")) || bytes.Equal(sg.bytes, []byte("required")) || bytes.Equal(sg.bytes, []byte("repeated"))) {
+				if i+2 < len(segments) && segments[i+1].kind == segmentContext && segments[i+2].kind == segmentColumn {
+					mergedColumn := segment{
+						kind:  segmentColumn,
+						bytes: append(append(sg.bytes, segments[i+1].bytes...), segments[i+2].bytes...),
+					}
+					segments = append(segments[:i], append([]segment{mergedColumn}, segments[i+3:]...)...)
+					break
+				}
+			}
+		}
+
+		lines = append(lines, segments)
+	}
+
+	// find the longest string in each column
+	colWidths := make([]int, 10)
+	for _, segments := range lines {
+		colIdx := 0
+		for _, sg := range segments {
+			if sg.kind == segmentColumn {
+				if len(sg.bytes) > colWidths[colIdx] {
+					colWidths[colIdx] = len(sg.bytes)
+				}
+				colIdx++
+			}
+		}
+	}
+
+	// print with padding
+	for _, segments := range lines {
+		colIdx := 0
+		for _, sg := range segments {
+			if sg.kind == segmentContext {
+				fmt.Fprint(w, string(sg.bytes))
+			} else {
+				fmt.Fprintf(w, "%-*s", colWidths[colIdx], string(sg.bytes))
+				colIdx++
+			}
+		}
+	}
 }
 
 func shouldEmitLabel(fld *desc.FieldDescriptor) bool {
@@ -2422,13 +2558,16 @@ func (a elementSrcOrder) Less(i, j int) bool {
 
 type customSortOrder struct {
 	elementAddrs
-	less func(a, b Element) bool
+	sourceOrder elementSrcOrder
+	less        func(a, b Element, ignore func() bool) bool
 }
 
 func (cso customSortOrder) Less(i, j int) bool {
 	ei := asElement(cso.at(cso.addrs[i]))
 	ej := asElement(cso.at(cso.addrs[j]))
-	return cso.less(ei, ej)
+	return cso.less(ei, ej, func() bool {
+		return cso.sourceOrder.Less(i, j)
+	})
 }
 
 type optionsByName struct {
