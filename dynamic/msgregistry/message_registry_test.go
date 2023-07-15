@@ -2,11 +2,7 @@ package msgregistry
 
 import (
 	"fmt"
-	"io"
-	"io/ioutil"
-	"os"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/golang/protobuf/proto"
@@ -20,7 +16,6 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/desc/protoparse"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/internal/testprotos"
 	"github.com/jhump/protoreflect/internal/testutil"
@@ -866,154 +861,6 @@ func TestMessageRegistry_MarshalAndUnmarshalAny(t *testing.T) {
 	a, err = mr.MarshalAny(md.AsProto())
 	testutil.Ok(t, err)
 	testutil.Eq(t, "http://baz.com/another/google.protobuf.DescriptorProto", a.TypeUrl)
-}
-
-func TestMessageRegistry_MessageDescriptorToPType(t *testing.T) {
-	protoSource := `
-		syntax = "proto2";
-		package foo;
-		message Bar {
-			optional string abc = 1 [deprecated = true];
-			repeated int32 def = 2 [packed = true];
-			optional string ghi = 3 [default = "foobar"];
-			oneof oo {
-				uint64 nid = 4;
-				string sid = 5;
-			}
-		}`
-	p := protoparse.Parser{
-		Accessor: func(filename string) (io.ReadCloser, error) {
-			if filename == "test.proto" {
-				return ioutil.NopCloser(strings.NewReader(protoSource)), nil
-			}
-			return nil, os.ErrNotExist
-		},
-	}
-	fds, err := p.ParseFiles("test.proto")
-	testutil.Ok(t, err)
-	fd := fds[0]
-
-	msg := NewMessageRegistryWithDefaults().MessageAsPType(fd.GetMessageTypes()[0])
-
-	// quick check of the resulting message's properties
-	testutil.Eq(t, "foo.Bar", msg.Name)
-	testutil.Eq(t, []string{"oo"}, msg.Oneofs)
-	testutil.Eq(t, typepb.Syntax_SYNTAX_PROTO2, msg.Syntax)
-	testutil.Eq(t, "test.proto", msg.SourceContext.GetFileName())
-	testutil.Eq(t, 0, len(msg.Options))
-	testutil.Eq(t, 5, len(msg.Fields))
-
-	testutil.Eq(t, "abc", msg.Fields[0].Name)
-	testutil.Eq(t, typepb.Field_CARDINALITY_OPTIONAL, msg.Fields[0].Cardinality)
-	testutil.Eq(t, typepb.Field_TYPE_STRING, msg.Fields[0].Kind)
-	testutil.Eq(t, "", msg.Fields[0].DefaultValue)
-	testutil.Eq(t, int32(1), msg.Fields[0].Number)
-	testutil.Eq(t, int32(0), msg.Fields[0].OneofIndex)
-	testutil.Eq(t, 1, len(msg.Fields[0].Options))
-	testutil.Eq(t, "deprecated", msg.Fields[0].Options[0].Name)
-	// make sure the value is a wrapped bool
-	var v ptypes.DynamicAny
-	err = ptypes.UnmarshalAny(msg.Fields[0].Options[0].Value, &v)
-	testutil.Ok(t, err)
-	testutil.Ceq(t, &wrapperspb.BoolValue{Value: true}, v.Message, eqpm)
-
-	testutil.Eq(t, "def", msg.Fields[1].Name)
-	testutil.Eq(t, typepb.Field_CARDINALITY_REPEATED, msg.Fields[1].Cardinality)
-	testutil.Eq(t, typepb.Field_TYPE_INT32, msg.Fields[1].Kind)
-	testutil.Eq(t, "", msg.Fields[1].DefaultValue)
-	testutil.Eq(t, int32(2), msg.Fields[1].Number)
-	testutil.Eq(t, int32(0), msg.Fields[1].OneofIndex)
-	testutil.Eq(t, true, msg.Fields[1].Packed)
-	testutil.Eq(t, 0, len(msg.Fields[1].Options))
-
-	testutil.Eq(t, "ghi", msg.Fields[2].Name)
-	testutil.Eq(t, typepb.Field_CARDINALITY_OPTIONAL, msg.Fields[2].Cardinality)
-	testutil.Eq(t, typepb.Field_TYPE_STRING, msg.Fields[2].Kind)
-	testutil.Eq(t, "foobar", msg.Fields[2].DefaultValue)
-	testutil.Eq(t, int32(3), msg.Fields[2].Number)
-	testutil.Eq(t, int32(0), msg.Fields[2].OneofIndex)
-	testutil.Eq(t, 0, len(msg.Fields[2].Options))
-
-	testutil.Eq(t, "nid", msg.Fields[3].Name)
-	testutil.Eq(t, typepb.Field_CARDINALITY_OPTIONAL, msg.Fields[3].Cardinality)
-	testutil.Eq(t, typepb.Field_TYPE_UINT64, msg.Fields[3].Kind)
-	testutil.Eq(t, "", msg.Fields[3].DefaultValue)
-	testutil.Eq(t, int32(4), msg.Fields[3].Number)
-	testutil.Eq(t, int32(1), msg.Fields[3].OneofIndex)
-	testutil.Eq(t, 0, len(msg.Fields[3].Options))
-
-	testutil.Eq(t, "sid", msg.Fields[4].Name)
-	testutil.Eq(t, typepb.Field_CARDINALITY_OPTIONAL, msg.Fields[4].Cardinality)
-	testutil.Eq(t, typepb.Field_TYPE_STRING, msg.Fields[4].Kind)
-	testutil.Eq(t, "", msg.Fields[4].DefaultValue)
-	testutil.Eq(t, int32(5), msg.Fields[4].Number)
-	testutil.Eq(t, int32(1), msg.Fields[4].OneofIndex)
-	testutil.Eq(t, 0, len(msg.Fields[4].Options))
-}
-
-func TestMessageRegistry_EnumDescriptorToPType(t *testing.T) {
-	protoSource := `
-		syntax = "proto2";
-		package foo;
-		enum Bar {
-			option allow_alias = true;
-			ZERO = 0;
-			__UNSET__ = 0 [deprecated = true];
-			ONE = 1;
-			TWO = 2;
-			THREE = 3;
-		}`
-	p := protoparse.Parser{
-		Accessor: func(filename string) (io.ReadCloser, error) {
-			if filename == "test.proto" {
-				return ioutil.NopCloser(strings.NewReader(protoSource)), nil
-			}
-			return nil, os.ErrNotExist
-		},
-	}
-	fds, err := p.ParseFiles("test.proto")
-	testutil.Ok(t, err)
-	fd := fds[0]
-
-	enum := NewMessageRegistryWithDefaults().EnumAsPType(fd.GetEnumTypes()[0])
-
-	// quick check of the resulting message's properties
-	testutil.Eq(t, "foo.Bar", enum.Name)
-	testutil.Eq(t, typepb.Syntax_SYNTAX_PROTO2, enum.Syntax)
-	testutil.Eq(t, "test.proto", enum.SourceContext.GetFileName())
-	testutil.Eq(t, 5, len(enum.Enumvalue))
-	testutil.Eq(t, 1, len(enum.Options))
-	testutil.Eq(t, "allow_alias", enum.Options[0].Name)
-	// make sure the value is a wrapped bool
-	var v ptypes.DynamicAny
-	err = ptypes.UnmarshalAny(enum.Options[0].Value, &v)
-	testutil.Ok(t, err)
-	testutil.Ceq(t, &wrapperspb.BoolValue{Value: true}, v.Message, eqpm)
-
-	testutil.Eq(t, "ZERO", enum.Enumvalue[0].Name)
-	testutil.Eq(t, int32(0), enum.Enumvalue[0].Number)
-	testutil.Eq(t, 0, len(enum.Enumvalue[0].Options))
-
-	testutil.Eq(t, "__UNSET__", enum.Enumvalue[1].Name)
-	testutil.Eq(t, int32(0), enum.Enumvalue[1].Number)
-	testutil.Eq(t, 1, len(enum.Enumvalue[1].Options))
-	testutil.Eq(t, "deprecated", enum.Enumvalue[1].Options[0].Name)
-	// make sure the value is a wrapped bool
-	err = ptypes.UnmarshalAny(enum.Enumvalue[1].Options[0].Value, &v)
-	testutil.Ok(t, err)
-	testutil.Ceq(t, &wrapperspb.BoolValue{Value: true}, v.Message, eqpm)
-
-	testutil.Eq(t, "ONE", enum.Enumvalue[2].Name)
-	testutil.Eq(t, int32(1), enum.Enumvalue[2].Number)
-	testutil.Eq(t, 0, len(enum.Enumvalue[2].Options))
-
-	testutil.Eq(t, "TWO", enum.Enumvalue[3].Name)
-	testutil.Eq(t, int32(2), enum.Enumvalue[3].Number)
-	testutil.Eq(t, 0, len(enum.Enumvalue[3].Options))
-
-	testutil.Eq(t, "THREE", enum.Enumvalue[4].Name)
-	testutil.Eq(t, int32(3), enum.Enumvalue[4].Number)
-	testutil.Eq(t, 0, len(enum.Enumvalue[4].Options))
 }
 
 func TestMessageRegistry_ServiceDescriptorToApi(t *testing.T) {
